@@ -6,6 +6,7 @@
 package bandwidth
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/cilium/hive/hivetest"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cilium/cilium/pkg/datapath/linux/bandwidth/types"
 	"github.com/cilium/cilium/pkg/maps/bwmap"
 	"github.com/cilium/cilium/pkg/node"
 )
@@ -34,7 +36,7 @@ func TestEnsureHostEndpointQoS(t *testing.T) {
 		m := newTestManager(t, db, edtTable)
 
 		// Call UpdateBandwidthLimit for a pod
-		m.UpdateBandwidthLimit(100, 1000000, 0)
+		m.UpdateBandwidthLimit(100, 1000000, 0, DSCPMarkUnset)
 
 		// Verify host endpoint was NOT inserted (template ID should be skipped)
 		txn := db.ReadTxn()
@@ -63,7 +65,7 @@ func TestEnsureHostEndpointQoS(t *testing.T) {
 		m := newTestManager(t, db, edtTable)
 
 		// Call UpdateBandwidthLimit for a pod
-		m.UpdateBandwidthLimit(100, 1000000, 0)
+		m.UpdateBandwidthLimit(100, 1000000, 0, DSCPMarkUnset)
 
 		// Verify host endpoint was inserted with Guaranteed QoS
 		txn := db.ReadTxn()
@@ -95,7 +97,7 @@ func TestEnsureHostEndpointQoS(t *testing.T) {
 		m := newTestManager(t, db, edtTable)
 
 		// First call - sets up host endpoint
-		m.UpdateBandwidthLimit(100, 1000000, 0)
+		m.UpdateBandwidthLimit(100, 1000000, 0, DSCPMarkUnset)
 		assert.True(t, m.hostEpDone.Load(), "hostEpDone should be true after first call")
 
 		// Manually delete the host endpoint entry to verify it's not re-added
@@ -117,7 +119,7 @@ func TestEnsureHostEndpointQoS(t *testing.T) {
 		assert.False(t, found, "Host endpoint should be deleted")
 
 		// Second call - should skip host endpoint setup (flag is already true)
-		m.UpdateBandwidthLimit(101, 2000000, 0)
+		m.UpdateBandwidthLimit(101, 2000000, 0, DSCPMarkUnset)
 
 		// Verify host endpoint is still NOT present (proves we skipped setup)
 		rtxn2 := db.ReadTxn()
@@ -143,14 +145,14 @@ func TestEnsureHostEndpointQoS(t *testing.T) {
 		m := newTestManager(t, db, edtTable)
 
 		// First call - host EP not ready, should skip
-		m.UpdateBandwidthLimit(100, 1000000, 0)
+		m.UpdateBandwidthLimit(100, 1000000, 0, DSCPMarkUnset)
 		assert.False(t, m.hostEpDone.Load(), "hostEpDone should be false when host EP not ready")
 
 		// Host endpoint becomes available
 		node.SetEndpointID(42)
 
 		// Second call - should now set up host EP
-		m.UpdateBandwidthLimit(101, 2000000, 0)
+		m.UpdateBandwidthLimit(101, 2000000, 0, DSCPMarkUnset)
 		assert.True(t, m.hostEpDone.Load(), "hostEpDone should be true after host EP becomes available")
 
 		// Verify host endpoint was inserted
@@ -162,6 +164,136 @@ func TestEnsureHostEndpointQoS(t *testing.T) {
 		require.True(t, found, "Host endpoint should be inserted")
 		assert.Equal(t, uint32(GuaranteedQoSDefaultPriority), hostEntry.Prio)
 	})
+}
+
+func TestParseEgressDSCPMark(t *testing.T) {
+	tests := []struct {
+		name      string
+		enabled   bool
+		value     string
+		want      uint32
+		wantError bool
+	}{
+		{
+			name:    "disabled ignores explicit value",
+			enabled: false,
+			value:   "46",
+			want:    DSCPMarkUnset,
+		},
+		{
+			name:    "explicit value",
+			enabled: true,
+			value:   "46",
+			want:    EncodeDSCPMark(46),
+		},
+		{
+			name:    "explicit zero is encoded",
+			enabled: true,
+			value:   "0",
+			want:    EncodeDSCPMark(0),
+		},
+		{
+			name:    "explicit max value 63 round-trips",
+			enabled: true,
+			value:   "63",
+			want:    EncodeDSCPMark(63),
+		},
+		{
+			name:      "explicit value out of range",
+			enabled:   true,
+			value:     "64",
+			want:      DSCPMarkUnset,
+			wantError: true,
+		},
+		{
+			name:      "non-numeric value returns error",
+			enabled:   true,
+			value:     "abc",
+			want:      DSCPMarkUnset,
+			wantError: true,
+		},
+		{
+			name:    "whitespace-only value treated as empty",
+			enabled: true,
+			value:   "   ",
+			want:    DSCPMarkUnset,
+		},
+		{
+			name:    "missing explicit value does not imply dscp",
+			enabled: true,
+			want:    DSCPMarkUnset,
+		},
+		{
+			name:    "disabled ignores garbage value without error",
+			enabled: false,
+			value:   "abc",
+			want:    DSCPMarkUnset,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseEgressDSCPMark(tt.value, tt.enabled)
+			if tt.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestEncodeDSCPMark(t *testing.T) {
+	t.Run("zero is encoded as 1", func(t *testing.T) {
+		assert.Equal(t, uint32(1), EncodeDSCPMark(0))
+	})
+	t.Run("max value 63 is encoded as 64", func(t *testing.T) {
+		assert.Equal(t, uint32(64), EncodeDSCPMark(63))
+	})
+	t.Run("out-of-range value returns DSCPMarkUnset", func(t *testing.T) {
+		assert.Equal(t, DSCPMarkUnset, EncodeDSCPMark(64))
+		assert.Equal(t, DSCPMarkUnset, EncodeDSCPMark(255))
+	})
+	t.Run("encode/format round-trips for valid DSCP values", func(t *testing.T) {
+		for dscp := uint32(0); dscp <= 63; dscp++ {
+			encoded := EncodeDSCPMark(dscp)
+			require.NotEqual(t, DSCPMarkUnset, encoded, "DSCP %d should encode to a non-unset value", dscp)
+			assert.Equal(t, fmt.Sprintf("%d", dscp), bwmap.FormatDSCPMark(encoded))
+		}
+	})
+}
+
+func TestUpdateBandwidthLimitStoresDSCPMark(t *testing.T) {
+	originalEndpointID, _ := node.GetEndpointID()
+	t.Cleanup(func() {
+		node.SetEndpointID(originalEndpointID)
+	})
+	node.SetEndpointID(0xffff)
+
+	db, edtTable := setupTestDB(t)
+	m := newTestManager(t, db, edtTable)
+
+	m.UpdateBandwidthLimit(100, 1000000, 0, EncodeDSCPMark(46))
+
+	entry, _, found := edtTable.Get(db.ReadTxn(), bwmap.EdtIDIndex.Query(bwmap.EdtIDKey{
+		EndpointID: 100,
+		Direction:  DirectionEgress,
+	}))
+	require.True(t, found)
+	assert.Equal(t, EncodeDSCPMark(46), entry.DSCPMark)
+}
+
+func TestProbeRequiresBandwidthManagerForDSCPMarking(t *testing.T) {
+	m := &manager{
+		params: bandwidthManagerParams{
+			Config: types.Config{
+				EnableDSCPMarking: true,
+			},
+		},
+	}
+
+	require.ErrorContains(t, m.probe(), "cannot enable --enable-dscp-marking without enabling --enable-bandwidth-manager")
 }
 
 // setupTestDB creates a test StateDB with the EdtTable registered.

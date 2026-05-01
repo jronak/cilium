@@ -602,6 +602,7 @@ int cil_to_overlay(struct __ctx_buff *ctx)
 	bool snat_done __maybe_unused = ctx_snat_done(ctx);
 	struct trace_ctx __maybe_unused trace;
 	struct bpf_tunnel_key tunnel_key = {};
+	__u32 dscp_mark __maybe_unused = 0;
 	__u32 src_sec_identity = UNKNOWN_ID;
 	int ret = TC_ACT_OK;
 	__u32 cluster_id __maybe_unused = 0;
@@ -621,7 +622,7 @@ int cil_to_overlay(struct __ctx_buff *ctx)
 	 * timestamp already here. The tunnel dev has noqueue qdisc, so as
 	 * tradeoff it's close enough.
 	 */
-	ret = edt_sched_departure(ctx, proto);
+	ret = edt_sched_departure(ctx, proto, false, &dscp_mark);
 	/* No send_drop_notify_error() here given we're rate-limiting. */
 	if (ret < 0) {
 		update_metrics(ctx_full_len(ctx), METRIC_EGRESS, (__u8)-ret);
@@ -639,10 +640,19 @@ int cil_to_overlay(struct __ctx_buff *ctx)
 
 	/* We might see some unexpected packets without tunnel_key (eg. IPv6 ND).
 	 * No need to worry, the geneve/vxlan kernel drivers will drop them.
+	 *
+	 * TODO: This currently only handles IPv4 underlay tunnels. IPv6
+	 * underlay support requires retrying ctx_get_tunnel_key() with
+	 * BPF_F_TUNINFO_IPV6 and is tracked separately.
 	 */
-	if (!ctx_get_tunnel_key(ctx, &tunnel_key, TUNNEL_KEY_WITHOUT_SRC_IP, 0))
+	if (!ctx_get_tunnel_key(ctx, &tunnel_key, TUNNEL_KEY_WITHOUT_SRC_IP, 0)) {
 		src_sec_identity = get_id_from_tunnel_id(tunnel_key.tunnel_id,
 							 ctx_get_protocol(ctx));
+		ret = edt_set_tunnel_dscp_mark(ctx, &tunnel_key, proto,
+					       BPF_F_ZERO_CSUM_TX, dscp_mark);
+		if (IS_ERR(ret))
+			goto out;
+	}
 
 	set_identity_mark(ctx, src_sec_identity, MARK_MAGIC_OVERLAY);
 
@@ -653,8 +663,8 @@ int cil_to_overlay(struct __ctx_buff *ctx)
 	}
 
 	ret = handle_nat_fwd(ctx, cluster_id, src_sec_identity, proto, false, &trace, &ext_err);
-out:
 #endif
+out:
 	if (IS_ERR(ret))
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
 						  METRIC_EGRESS);

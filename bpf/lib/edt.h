@@ -5,6 +5,8 @@
 
 #include <bpf/ctx/ctx.h>
 
+#include <linux/ip.h>
+
 #include "common.h"
 #include "time.h"
 
@@ -25,7 +27,7 @@ struct edt_info {
 		__u64	tokens;
 	};
 	__u32		prio;
-	__u32		pad_32;
+	__u32		dscp_mark;
 	__u64		pad[3];
 };
 
@@ -62,7 +64,103 @@ static __always_inline __u32 edt_get_aggregate(struct __ctx_buff *ctx)
 }
 
 static __always_inline int
-edt_sched_departure(struct __ctx_buff *ctx, __be16 proto)
+edt_set_dscp_mark(struct __ctx_buff *ctx, __be16 proto, __u32 dscp_mark)
+{
+#ifdef ENABLE_DSCP_MARKING
+	__u8 dscp, ecn, new_tclass;
+
+	if (!dscp_mark || dscp_mark > 64)
+		return CTX_ACT_OK;
+
+	dscp = (__u8)(dscp_mark - 1);
+
+	if (proto == bpf_htons(ETH_P_IP)) {
+		__u8 version_ihl, old_tos, new_tos;
+		__be16 old_word, new_word;
+
+		if (ctx_load_bytes(ctx, ETH_HLEN, &version_ihl, sizeof(version_ihl)) < 0)
+			return DROP_INVALID;
+		if (ctx_load_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, tos),
+				   &old_tos, sizeof(old_tos)) < 0)
+			return DROP_INVALID;
+
+		ecn = old_tos & 0x3;
+		new_tos = (__u8)((dscp << 2) | ecn);
+		if (old_tos == new_tos)
+			return CTX_ACT_OK;
+
+		old_word = bpf_htons((__u16)(((__u16)version_ihl << 8) | old_tos));
+		new_word = bpf_htons((__u16)(((__u16)version_ihl << 8) | new_tos));
+		if (ctx_store_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, tos),
+				    &new_tos, sizeof(new_tos), 0) < 0)
+			return DROP_WRITE_ERROR;
+		if (l3_csum_replace(ctx, ETH_HLEN + offsetof(struct iphdr, check),
+				    old_word, new_word, 2) < 0)
+			return DROP_CSUM_L3;
+	} else if (proto == bpf_htons(ETH_P_IPV6)) {
+		__u8 hdr[2];
+
+		if (ctx_load_bytes(ctx, ETH_HLEN, hdr, sizeof(hdr)) < 0)
+			return DROP_INVALID;
+
+		ecn = (((hdr[0] & 0x0f) << 4) | (hdr[1] >> 4)) & 0x3;
+		new_tclass = (__u8)((dscp << 2) | ecn);
+		hdr[0] = (hdr[0] & 0xf0) | (new_tclass >> 4);
+		hdr[1] = (__u8)((new_tclass << 4) | (hdr[1] & 0x0f));
+
+		if (ctx_store_bytes(ctx, ETH_HLEN, hdr, sizeof(hdr), 0) < 0)
+			return DROP_WRITE_ERROR;
+	}
+#endif
+	return CTX_ACT_OK;
+}
+
+static __always_inline int
+edt_get_packet_ecn(struct __ctx_buff *ctx, __be16 proto, __u8 *ecn)
+{
+	if (proto == bpf_htons(ETH_P_IP)) {
+		__u8 tos;
+
+		if (ctx_load_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, tos),
+				   &tos, sizeof(tos)) < 0)
+			return DROP_INVALID;
+		*ecn = tos & 0x3;
+	} else if (proto == bpf_htons(ETH_P_IPV6)) {
+		__u8 hdr[2];
+
+		if (ctx_load_bytes(ctx, ETH_HLEN, hdr, sizeof(hdr)) < 0)
+			return DROP_INVALID;
+		*ecn = (((hdr[0] & 0x0f) << 4) | (hdr[1] >> 4)) & 0x3;
+	}
+	return CTX_ACT_OK;
+}
+
+static __always_inline int
+edt_set_tunnel_dscp_mark(struct __ctx_buff *ctx, struct bpf_tunnel_key *key,
+			 __be16 proto, __u32 flags, __u32 dscp_mark)
+{
+#ifdef ENABLE_DSCP_MARKING
+	__u8 dscp, ecn;
+	int ret;
+
+	if (!dscp_mark || dscp_mark > 64)
+		return CTX_ACT_OK;
+
+	dscp = (__u8)(dscp_mark - 1);
+	ret = edt_get_packet_ecn(ctx, proto, &ecn);
+	if (IS_ERR(ret))
+		return ret;
+	key->tunnel_tos = (__u8)((dscp << 2) | ecn);
+
+	if (ctx_set_tunnel_key(ctx, key, TUNNEL_KEY_WITHOUT_SRC_IP, flags) < 0)
+		return DROP_WRITE_ERROR;
+#endif
+	return CTX_ACT_OK;
+}
+
+static __always_inline int
+edt_sched_departure(struct __ctx_buff *ctx, __be16 proto,
+		    bool mark_packet, __u32 *dscp_mark)
 {
 	__u64 delay, now, t, t_next;
 	struct edt_id aggregate = {};
@@ -83,6 +181,8 @@ edt_sched_departure(struct __ctx_buff *ctx, __be16 proto)
 	info = map_lookup_elem(&cilium_throttle, &aggregate);
 	if (!info)
 		return CTX_ACT_OK;
+	if (dscp_mark)
+		*dscp_mark = info->dscp_mark;
 	if (!info->bps)
 		goto out;
 
@@ -94,7 +194,7 @@ edt_sched_departure(struct __ctx_buff *ctx, __be16 proto)
 	t_next = READ_ONCE(info->t_last) + delay;
 	if (t_next <= t) {
 		WRITE_ONCE(info->t_last, t);
-		return CTX_ACT_OK;
+		goto out;
 	}
 	/* FQ implements a drop horizon, see also 39d010504e6b ("net_sched:
 	 * sch_fq: add horizon attribute"). However, we explicitly need the
@@ -111,6 +211,8 @@ out:
 	 */
 	if (info->prio)
 		ctx->priority = info->prio - 1;
+	if (mark_packet)
+		return edt_set_dscp_mark(ctx, proto, info->dscp_mark);
 	return CTX_ACT_OK;
 }
 #else

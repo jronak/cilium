@@ -55,6 +55,32 @@ To enable the bandwidth manager on an existing installation, run
    :set: bandwidthManager.enabled=true
    :post-commands: kubectl -n kube-system rollout restart ds/cilium
 
+DSCP Marking
+============
+
+DSCP marking for Pod egress traffic is disabled by default and requires the
+bandwidth manager. To enable it, run:
+
+.. cilium-helm-upgrade::
+   :namespace: kube-system
+   :extra-args: --reuse-values
+   :set: bandwidthManager.enabled=true
+         bandwidthManager.dscp.enabled=true
+   :post-commands: kubectl -n kube-system rollout restart ds/cilium
+
+Once enabled, set the ``bandwidth.cilium.io/egress-dscp`` Pod annotation to a
+decimal DSCP value from ``0`` to ``63``. Cilium preserves the ECN bits while
+rewriting the IPv4 DS field or IPv6 Traffic Class. In tunneling mode, the mark
+is applied to the outer header seen by the underlay network.
+
+DSCP marking applies only to packets originating from local Pods that have a
+bandwidth manager EDT entry installed for them. Transit traffic forwarded
+through this node, and packets from Pods without this annotation, are not
+modified.
+
+The ``bandwidth.cilium.io/priority`` annotation continues to affect local
+queueing priority only and does not imply DSCP marking.
+
 The native host networking devices are auto detected as native devices which have
 the default route on the host or have Kubernetes ``InternalIP`` or ``ExternalIP`` assigned.
 ``InternalIP`` is preferred over ``ExternalIP`` if both exist. To change and manually specify

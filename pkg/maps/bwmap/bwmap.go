@@ -38,17 +38,27 @@ func (k *EdtId) String() string {
 
 func (k *EdtId) New() bpf.MapKey { return &EdtId{} }
 
+func FormatDSCPMark(dscpMark uint32) string {
+	if dscpMark == 0 {
+		return "unset"
+	}
+	if dscpMark > 64 {
+		return fmt.Sprintf("invalid(%d)", dscpMark)
+	}
+	return fmt.Sprintf("%d", dscpMark-1)
+}
+
 type EdtInfo struct {
 	Bps                     uint64    `align:"bps"`
 	TimeLast                uint64    `align:"t_last"`
 	TimeHorizonDropOrTokens uint64    `align:"$union0"`
 	Prio                    uint32    `align:"prio"`
-	Pad32                   uint32    `align:"pad_32"`
+	DSCPMark                uint32    `align:"dscp_mark"`
 	Pad                     [3]uint64 `align:"pad"`
 }
 
 func (v *EdtInfo) String() string {
-	return fmt.Sprintf("%d, %d", int(v.Bps), int(v.Prio))
+	return fmt.Sprintf("%d, %d, %s", int(v.Bps), int(v.Prio), FormatDSCPMark(v.DSCPMark))
 }
 
 func (v *EdtInfo) New() bpf.MapValue { return &EdtInfo{} }
