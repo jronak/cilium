@@ -56,7 +56,7 @@
 {{- end }}
 
 {{/* validate bandwidth manager DSCP requirements */}}
-{{- if and .Values.bandwidthManager.dscp.enabled (not .Values.bandwidthManager.enabled) }}
+{{- if and (dig "dscp" "enabled" false .Values.bandwidthManager) (not .Values.bandwidthManager.enabled) }}
   {{- fail "bandwidthManager.dscp.enabled requires bandwidthManager.enabled=true" }}
 {{- end }}
 

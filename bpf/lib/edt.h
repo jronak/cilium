@@ -140,7 +140,7 @@ edt_set_tunnel_dscp_mark(struct __ctx_buff *ctx, struct bpf_tunnel_key *key,
 			 __be16 proto, __u32 flags, __u32 dscp_mark)
 {
 #ifdef ENABLE_DSCP_MARKING
-	__u8 dscp, ecn;
+	__u8 dscp, ecn = 0;
 	int ret;
 
 	if (!dscp_mark || dscp_mark > 64)

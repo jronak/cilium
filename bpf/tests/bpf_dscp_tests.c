@@ -332,4 +332,98 @@ int dscp_ipv6_check(struct __ctx_buff *ctx)
 	test_finish();
 }
 
+PKTGEN("tc", "edt_tunnel_dscp_mark")
+int tunnel_dscp_pktgen(struct __ctx_buff *ctx)
+{
+	struct pktgen builder;
+	struct ethhdr *l2;
+	struct iphdr *l3;
+	struct udphdr *l4;
+
+	pktgen__init(&builder, ctx);
+
+	l2 = pktgen__push_ethhdr(&builder);
+	if (!l2)
+		return TEST_ERROR;
+	ethhdr__set_macs(l2, (__u8 *)mac_one, (__u8 *)mac_two);
+
+	l3 = pktgen__push_default_iphdr(&builder);
+	if (!l3)
+		return TEST_ERROR;
+	l3->tos = 0x03;
+
+	l4 = pktgen__push_default_udphdr(&builder);
+	if (!l4)
+		return TEST_ERROR;
+	l4->source = bpf_htons(1234);
+	l4->dest = bpf_htons(53);
+
+	pktgen__finish(&builder);
+	return 0;
+}
+
+CHECK("tc", "edt_tunnel_dscp_mark")
+int tunnel_dscp_check(struct __ctx_buff *ctx)
+{
+	test_init();
+
+	TEST("edt_get_packet_ecn_extracts_ecn", {
+		__u8 ecn = 0xff;
+		int ret = edt_get_packet_ecn(ctx, bpf_htons(ETH_P_IP), &ecn);
+
+		assert(ret == CTX_ACT_OK);
+		if (ecn != 0x03)
+			test_fatal("ECN extraction wrong: got 0x%x, want 0x03",
+				   ecn);
+	});
+
+	TEST("tunnel_dscp_noop_on_zero", {
+		struct bpf_tunnel_key key = {};
+
+		key.tunnel_tos = 0xAA;
+		int ret = edt_set_tunnel_dscp_mark(ctx, &key,
+						    bpf_htons(ETH_P_IP),
+						    BPF_F_ZERO_CSUM_TX, 0);
+		assert(ret == CTX_ACT_OK);
+		if (key.tunnel_tos != 0xAA)
+			test_fatal("tunnel_tos changed on dscp=0: got 0x%x",
+				   key.tunnel_tos);
+	});
+
+	TEST("tunnel_dscp_noop_on_out_of_range", {
+		struct bpf_tunnel_key key = {};
+
+		key.tunnel_tos = 0xBB;
+		int ret = edt_set_tunnel_dscp_mark(ctx, &key,
+						    bpf_htons(ETH_P_IP),
+						    BPF_F_ZERO_CSUM_TX, 200);
+		assert(ret == CTX_ACT_OK);
+		if (key.tunnel_tos != 0xBB)
+			test_fatal("tunnel_tos changed on dscp>64: got 0x%x",
+				   key.tunnel_tos);
+	});
+
+	TEST("tunnel_dscp_sets_tos_preserving_ecn", {
+		struct bpf_tunnel_key key = {};
+		__u8 expected_tos;
+
+		key.tunnel_id = 42;
+		expected_tos = (__u8)((46 << 2) | 0x03);
+		int ret = edt_set_tunnel_dscp_mark(ctx, &key,
+						    bpf_htons(ETH_P_IP),
+						    BPF_F_ZERO_CSUM_TX,
+						    ENCODE_DSCP(46));
+		if (key.tunnel_tos != expected_tos)
+			test_fatal("tunnel_tos wrong: got 0x%x, want 0x%x",
+				   key.tunnel_tos, expected_tos);
+		/* ctx_set_tunnel_key may fail in the test runner;
+		 * accept either OK or DROP_WRITE_ERROR.
+		 */
+		if (ret != CTX_ACT_OK && ret != DROP_WRITE_ERROR)
+			test_fatal("unexpected return: %d", ret);
+	});
+
+	test_finish();
+}
+
 BPF_LICENSE("Dual BSD/GPL");

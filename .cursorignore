@@ -1,0 +1,18 @@
+# Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)
+
+*
+!*/
+
+*.yaml
+*.yml
+*.json
+*.txt
+*.sh
+*.bash
+*.zsh
+*.fish
+
+!pkg/**/*
+!bpf/**/*
+!plugins/**/*
+!api/**/*
