@@ -21,12 +21,20 @@ import (
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/node/addressing"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 const (
 	minNodeID = 1
 	maxNodeID = idpool.ID(^uint16(0))
 )
+
+// skipNodeID reports whether addr is a configured local router IP. Such an
+// address may be shared by all nodes, so it cannot identify a node.
+func skipNodeID(addr nodeTypes.Address) bool {
+	return addr.Type == addressing.NodeCiliumInternalIP &&
+		option.Config.IsLocalRouterIP(addr.IP.Addr)
+}
 
 func (n *linuxNodeHandler) GetNodeIP(nodeID uint16) string {
 	n.mutex.RLock()
@@ -83,6 +91,9 @@ func (n *linuxNodeHandler) getNodeIDForIP(nodeIP netip.Addr) (uint16, bool) {
 func (n *linuxNodeHandler) getNodeIDForNode(node *nodeTypes.Node) uint16 {
 	nodeID := uint16(0)
 	for _, addr := range node.IPAddresses {
+		if skipNodeID(addr) {
+			continue
+		}
 		if id, exists := n.nodeIDsByIPs[addr.IP.String()]; exists {
 			nodeID = id
 		}
@@ -132,6 +143,9 @@ func (n *linuxNodeHandler) allocateIDForNode(oldNode *nodeTypes.Node, node *node
 	}
 
 	for _, addr := range node.IPAddresses {
+		if skipNodeID(addr) {
+			continue
+		}
 		ip := addr.IP.String()
 		if id, exists := n.nodeIDsByIPs[ip]; exists && id == nodeID {
 			if !SPIChanged {
@@ -142,6 +156,9 @@ func (n *linuxNodeHandler) allocateIDForNode(oldNode *nodeTypes.Node, node *node
 			// is deleted while the agent is down and its IPs are reused. To
 			// allocate a fresh ID, unmap the IPs of this node, and try again.
 			for _, addr := range node.IPAddresses {
+				if skipNodeID(addr) {
+					continue
+				}
 				if err := n.unmapNodeID(addr.IP.String()); err != nil {
 					n.log.Error("Failed to unmap stale nodeID mapping",
 						logfields.IPAddr, ip,
@@ -183,6 +200,9 @@ func (n *linuxNodeHandler) deallocateIDForNode(oldNode *nodeTypes.Node) error {
 
 	// Check that all node IDs of the node had the same node ID.
 	for _, addr := range oldNode.IPAddresses {
+		if skipNodeID(addr) {
+			continue
+		}
 		nodeIPs[addr.IP.String()] = true
 		id := n.nodeIDsByIPs[addr.IP.String()]
 		if nodeID != id {
@@ -284,6 +304,9 @@ func (n *linuxNodeHandler) unmapNodeID(ip string) error {
 func (n *linuxNodeHandler) diffAndUnmapNodeIPs(oldIPs, newIPs []nodeTypes.Address) {
 nextOldIP:
 	for _, oldAddr := range oldIPs {
+		if skipNodeID(oldAddr) {
+			continue
+		}
 		for _, newAddr := range newIPs {
 			if newAddr.IP == oldAddr.IP {
 				continue nextOldIP
@@ -335,7 +358,8 @@ func (n *linuxNodeHandler) RestoreNodeIDs() {
 		if key.Family == bpf.EndpointKeyIPv4 {
 			address = net.IP(key.IP[:net.IPv4len]).String()
 		}
-		if val.NodeID == 0 {
+		addr, _ := netip.ParseAddr(address)
+		if val.NodeID == 0 || option.Config.IsLocalRouterIP(addr) {
 			incorrectNodeIDs[address] = struct{}{}
 		}
 		nodeValues[address] = &nodemap.NodeValueV2{
