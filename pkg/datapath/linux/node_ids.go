@@ -243,7 +243,7 @@ func (n *linuxNodeHandler) deallocateNodeIDLocked(nodeID uint16, nodeIPs map[str
 	}
 
 	// unmapNodeID returns the ID to the pool once its last IP is removed.
-	if !hasIPs && !n.nodeIDs.Insert(idpool.ID(nodeID)) {
+	if nodeID != 0 && !hasIPs && !n.nodeIDs.Insert(idpool.ID(nodeID)) {
 		n.log.Warn("Attempted to deallocate a node ID that wasn't allocated",
 			logfields.NodeID, nodeID,
 		)

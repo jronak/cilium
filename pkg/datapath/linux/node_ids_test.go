@@ -139,3 +139,16 @@ func TestNodeIDReturnedWhenLastIPUnmapped(t *testing.T) {
 	require.Equal(t, idB, newIDB)
 	require.Equal(t, newIDB, handler.nodeIDsByIPs["10.0.0.2"])
 }
+
+func TestNodeIDZeroNeverEntersPool(t *testing.T) {
+	handler, _ := newTestLinuxNodeOps(t)
+	handler.nodeMap = &seededNodeMap{entries: map[netip.Addr]nodemap.NodeValueV2{
+		netip.MustParseAddr("10.0.0.1"): {NodeID: 0},
+	}}
+
+	handler.RestoreNodeIDs()
+	require.NoError(t, handler.deallocateIDForNode(
+		testNodeWithAddrs("node-b", testAddr(addressing.NodeInternalIP, "10.0.0.2"))))
+
+	require.False(t, handler.nodeIDs.Remove(0))
+}
