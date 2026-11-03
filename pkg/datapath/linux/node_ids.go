@@ -222,6 +222,7 @@ func (n *linuxNodeHandler) deallocateIDForNode(oldNode *nodeTypes.Node) error {
 
 func (n *linuxNodeHandler) deallocateNodeIDLocked(nodeID uint16, nodeIPs map[string]bool, nodeName string) error {
 	var errs error
+	_, hasIPs := n.nodeIPsByIDs[nodeID]
 	for ip := range n.nodeIPsByIDs[nodeID] {
 		// Check that only IPs of this node had this node ID.
 		if _, isIPOfOldNode := nodeIPs[ip]; !isIPOfOldNode {
@@ -241,7 +242,8 @@ func (n *linuxNodeHandler) deallocateNodeIDLocked(nodeID uint16, nodeIPs map[str
 		}
 	}
 
-	if !n.nodeIDs.Insert(idpool.ID(nodeID)) {
+	// unmapNodeID returns the ID to the pool once its last IP is removed.
+	if !hasIPs && !n.nodeIDs.Insert(idpool.ID(nodeID)) {
 		n.log.Warn("Attempted to deallocate a node ID that wasn't allocated",
 			logfields.NodeID, nodeID,
 		)
@@ -292,6 +294,10 @@ func (n *linuxNodeHandler) unmapNodeID(ip string) error {
 		n.nodeIPsByIDs[id].Delete(ip)
 		if n.nodeIPsByIDs[id].Len() == 0 {
 			delete(n.nodeIPsByIDs, id)
+			// ID 0 is the local node and must never enter the pool.
+			if id != 0 {
+				n.nodeIDs.Insert(idpool.ID(id))
+			}
 		}
 	}
 

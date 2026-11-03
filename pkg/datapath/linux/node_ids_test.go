@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/idpool"
 	iputil "github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/maps/nodemap"
 	"github.com/cilium/cilium/pkg/node/addressing"
@@ -112,4 +113,29 @@ func TestRestoreNodeIDsDropsLocalRouterIP(t *testing.T) {
 	require.Equal(t, uint16(3), handler.nodeIDsByIPs["10.0.0.1"])
 	require.NotContains(t, handler.nodeIDsByIPs, testLocalRouterIP)
 	require.NotContains(t, nodeMap.entries, netip.MustParseAddr(testLocalRouterIP))
+}
+
+func TestNodeIDReturnedWhenLastIPUnmapped(t *testing.T) {
+	handler, _ := newTestLinuxNodeOps(t)
+	handler.nodeIDs = idpool.NewIDPool(1, 2)
+
+	nodeA := testNodeWithAddrs("node-a",
+		testAddr(addressing.NodeInternalIP, "10.0.0.1"),
+		testAddr(addressing.NodeInternalIP, "192.0.2.1"),
+	)
+	nodeBPartial := testNodeWithAddrs("node-b", testAddr(addressing.NodeInternalIP, "10.0.0.2"))
+	nodeB := testNodeWithAddrs("node-b",
+		testAddr(addressing.NodeInternalIP, "10.0.0.2"),
+		testAddr(addressing.NodeInternalIP, "192.0.2.1"),
+	)
+
+	_, err := handler.allocateIDForNode(nil, nodeA)
+	require.NoError(t, err)
+	idB, err := handler.allocateIDForNode(nil, nodeBPartial)
+	require.NoError(t, err)
+
+	newIDB, err := handler.allocateIDForNode(nodeBPartial, nodeB)
+	require.NoError(t, err)
+	require.Equal(t, idB, newIDB)
+	require.Equal(t, newIDB, handler.nodeIDsByIPs["10.0.0.2"])
 }
